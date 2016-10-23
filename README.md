@@ -1,0 +1,2 @@
+# gravedigger
+finds unused gocode
