@@ -156,7 +156,10 @@ Example: 'gravedigger test/'
 				currentPos := fileSet.Position(node.Pos())
 				currentFile, _ := filepath.Abs(currentPos.Filename)
 				// fmt.Println("guru -json definition " + fmt.Sprintf("%s:#%d", fn, pos.Offset))
-				out, _ := exec.Command("guru", "-json", "definition", fmt.Sprintf("%s:#%d", currentFile, currentPos.Offset)).Output()
+				out, err := exec.Command("guru", "-json", "definition", fmt.Sprintf("%s:#%d", currentFile, currentPos.Offset)).Output()
+				if err != nil && err.Error() != "exit status 1" {
+					panic(err)
+				}
 				var def serial.Definition
 				json.Unmarshal(out, &def)
 				if def.ObjPos == "" {
