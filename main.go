@@ -5,6 +5,7 @@ for all code in a given directory.
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"go/ast"
@@ -12,9 +13,13 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
+
+	"golang.org/x/tools/oracle/serial"
 )
 
 var (
@@ -56,8 +61,8 @@ Options:`)
 	fmt.Printf("\n---------step 0-------------(find all code in directory)\n\n")
 
 	packages := make(map[string]*pkg)
-
 	fileSet := token.NewFileSet()
+
 	if err := filepath.Walk(dir, func(filePath string, info os.FileInfo, err error) error {
 		if !info.IsDir() {
 			return nil
@@ -141,7 +146,7 @@ Options:`)
 		}
 	}
 	for _, fp := range files {
-		ast.Walk(&walker{packages, fp.p, fp.f, fp.f.Scope}, fp.f)
+		ast.Walk(&walker{fp.p, fp.f, packages, fileSet}, fp.f)
 	}
 
 	// Step 3: return a list of unused functions
@@ -162,10 +167,10 @@ Options:`)
 }
 
 type walker struct {
-	ps map[string]*pkg
 	p  *pkg
 	f  *ast.File
-	s  *ast.Scope
+	ps map[string]*pkg
+	fs *token.FileSet
 }
 
 func (w *walker) Visit(n ast.Node) ast.Visitor {
@@ -185,9 +190,8 @@ func (w *walker) Visit(n ast.Node) ast.Visitor {
 		}
 	case *ast.BlockStmt:
 		// body of statement
-		ww := &walker{w.ps, w.p, w.f, ast.NewScope(w.s)}
 		for _, stmt := range node.List {
-			ast.Walk(ww, stmt)
+			ast.Walk(w, stmt)
 		}
 	case *ast.FuncDecl:
 		// function signatures
@@ -195,46 +199,30 @@ func (w *walker) Visit(n ast.Node) ast.Visitor {
 	case *ast.TypeSpec:
 		// type definitions
 		ast.Walk(w, node.Type)
-	case *ast.SelectorExpr:
-		// selectors like "subpackage.ExportedVariable"
-		X, ok := node.X.(*ast.Ident)
-		if !ok {
-			return w
-		}
-		if w.s.Lookup(X.Name) != nil {
-			return w
-		}
-		var subPkgName, subPkgPath string
-		for _, im := range w.f.Imports {
-			subPkgPath = strings.TrimSuffix(strings.TrimPrefix(im.Path.Value, `"`), `"`)
-			if im.Name != nil {
-				subPkgName = im.Name.Name
-			} else {
-				subPkgName = path.Base(subPkgPath)
-			}
-			if subPkgName == X.Name {
-				break
-			}
-		}
-		if subPkgName != X.Name {
-			return w
-		}
-		// fmt.Println("deleting ", node.Sel.Name, " from ", subPkgPath)
-		if _, ok := w.ps[subPkgPath].declares[node.Sel.Name]; ok {
-			fmt.Printf("%s:%s --- used\n", subPkgPath, node.Sel.Name)
-		}
-		delete(w.ps[subPkgPath].declares, node.Sel.Name)
 	case *ast.Ident:
-		// fmt.Println("found ident ", node, node.Name, node.Obj)
-		obj := w.s.Lookup(node.Name)
-		if obj != nil {
+		currentPos := w.fs.Position(node.Pos())
+		currentFile, _ := filepath.Abs(currentPos.Filename)
+		// fmt.Println("guru -json definition " + fmt.Sprintf("%s:#%d", fn, pos.Offset))
+		out, _ := exec.Command("guru", "-json", "definition", fmt.Sprintf("%s:#%d", currentFile, currentPos.Offset)).Output()
+		var def serial.Definition
+		json.Unmarshal(out, &def)
+		if def.ObjPos == "" {
 			return w
 		}
-		// fmt.Println("deleting ident", node.Name)
-		if _, ok := w.p.declares[node.Name]; ok {
-			fmt.Printf("%s:%s --- used\n", w.p.dir, node.Name)
-		}
-		delete(w.p.declares, node.Name)
+		// fmt.Println("found definition of ", node.Name)
+		// fmt.Println(def)
+		arr := strings.Split(def.ObjPos, ":")
+		defLine, _ := strconv.Atoi(arr[1])
+		defColumn, _ := strconv.Atoi(arr[2])
+		defFile := arr[0] //path.Join(build.Default.GOPATH, "src", w.p.dir, w.f.Name.Name+".go")
+		// fmt.Println("found node: ", node.Name)
+		fmt.Println("node at: ", currentFile, currentPos.Line, currentPos.Column)
+		fmt.Println("defn at: ", defFile, defLine, defColumn)
+
+		// if filename == currentFile && pos.Line == lineNumber && pos.Column == columnNumber {
+		//	return w
+		// }
+
 	}
 	return w
 }
