@@ -50,7 +50,7 @@ Example: 'gravedigger test/'
 
 	// Step 0: parse all packages and subpackages in this directory
 
-	fmt.Printf("\n---------step 0-------------(find all code in directory)\n\n")
+	fmt.Printf("\n---------step 0-------------(find all code in directories)\n\n")
 
 	packages := make(map[string]*pkg)
 
@@ -105,6 +105,21 @@ Example: 'gravedigger test/'
 						case *ast.TypeSpec:
 							// type definitions
 							pkg.declares[s.Name.Name] = s.Name
+							// add struct fields?
+							/*
+								ast.Inspect(s.Type, func(n ast.Node) bool {
+									node, ok := n.(*ast.StructType)
+									if !ok {
+										return true
+									}
+									for _, node2 := range node.Fields.List {
+										for _, node3 := range node2.Names {
+											pkg.declares[s.Name.Name+"."+node3.Name] = node3
+										}
+									}
+									return true
+								})
+							*/
 						}
 					}
 				}
@@ -123,18 +138,41 @@ Example: 'gravedigger test/'
 
 	fmt.Printf("\n---------step 2-------------(mark all used declarations)\n\n")
 
-	type fp struct {
-		f *ast.File
-		p *pkg
-	}
-	var files []fp
 	for _, p := range packages {
 		for _, f := range p.Files {
-			files = append(files, fp{f, p})
+			ast.Inspect(f, func(n ast.Node) bool {
+				node, ok := n.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				currentPos := fileSet.Position(node.Pos())
+				currentFile, _ := filepath.Abs(currentPos.Filename)
+				// fmt.Println("guru -json definition " + fmt.Sprintf("%s:#%d", fn, pos.Offset))
+				out, _ := exec.Command("guru", "-json", "definition", fmt.Sprintf("%s:#%d", currentFile, currentPos.Offset)).Output()
+				var def serial.Definition
+				json.Unmarshal(out, &def)
+				if def.ObjPos == "" {
+					return true
+				}
+				// fmt.Println("found definition of ", node.Name)
+				// fmt.Println(def)
+				arr := strings.Split(def.ObjPos, ":")
+				defLine, _ := strconv.Atoi(arr[1])
+				defColumn, _ := strconv.Atoi(arr[2])
+				defFile := arr[0] //path.Join(build.Default.GOPATH, "src", w.p.dir, w.f.Name.Name+".go")
+				// fmt.Println("found node: ", node.Name)
+				// fmt.Println("node at: ", currentFile, currentPos.Line, currentPos.Column)
+				// fmt.Println("defn at: ", defFile, defLine, defColumn)
+				if currentFile == defFile && currentPos.Line == defLine && currentPos.Column == defColumn {
+					return true
+				}
+				fmt.Println("need to dleete ", node.Name, " from ", defFile)
+				packageDir := filepath.Dir(defFile)
+				fmt.Println("declaration is in package: ", packageDir)
+				delete(packages[packageDir].declares, node.Name)
+				return true
+			})
 		}
-	}
-	for _, fp := range files {
-		ast.Walk(&walker{fp.p, fp.f, packages, fileSet}, fp.f)
 	}
 
 	// Step 3: return a list of unused functions
@@ -159,69 +197,4 @@ Example: 'gravedigger test/'
 			fmt.Printf("%s:%d:%d ---> %s\n", filename, pos.Line, pos.Column, node.Name)
 		}
 	}
-
-}
-
-type walker struct {
-	p  *pkg
-	f  *ast.File
-	ps map[string]*pkg
-	fs *token.FileSet
-}
-
-func (w *walker) Visit(n ast.Node) ast.Visitor {
-	switch node := n.(type) {
-	case *ast.AssignStmt:
-		// go through RHS of assignment
-		for _, v := range node.Rhs {
-			ast.Walk(w, v)
-		}
-	case *ast.ValueSpec:
-		// go through variable initializers
-		for _, v := range node.Values {
-			ast.Walk(w, v)
-		}
-		if node.Type != nil {
-			ast.Walk(w, node.Type)
-		}
-	case *ast.BlockStmt:
-		// body of statement
-		for _, stmt := range node.List {
-			ast.Walk(w, stmt)
-		}
-	case *ast.FuncDecl:
-		// function signatures
-		ast.Walk(w, node.Type)
-	case *ast.TypeSpec:
-		// type definitions
-		ast.Walk(w, node.Type)
-	case *ast.Ident:
-		currentPos := w.fs.Position(node.Pos())
-		currentFile, _ := filepath.Abs(currentPos.Filename)
-		// fmt.Println("guru -json definition " + fmt.Sprintf("%s:#%d", fn, pos.Offset))
-		out, _ := exec.Command("guru", "-json", "definition", fmt.Sprintf("%s:#%d", currentFile, currentPos.Offset)).Output()
-		var def serial.Definition
-		json.Unmarshal(out, &def)
-		if def.ObjPos == "" {
-			return w
-		}
-		// fmt.Println("found definition of ", node.Name)
-		// fmt.Println(def)
-		arr := strings.Split(def.ObjPos, ":")
-		defLine, _ := strconv.Atoi(arr[1])
-		defColumn, _ := strconv.Atoi(arr[2])
-		defFile := arr[0] //path.Join(build.Default.GOPATH, "src", w.p.dir, w.f.Name.Name+".go")
-		// fmt.Println("found node: ", node.Name)
-		// fmt.Println("node at: ", currentFile, currentPos.Line, currentPos.Column)
-		// fmt.Println("defn at: ", defFile, defLine, defColumn)
-
-		if currentFile == defFile && currentPos.Line == defLine && currentPos.Column == defColumn {
-			return w
-		}
-		// fmt.Println("need to dleete ", node.Name, " from ", defFile)
-		packageDir := filepath.Dir(defFile)
-		// fmt.Println("declaration is in package: ", packageDir)
-		delete(w.ps[packageDir].declares, node.Name)
-	}
-	return w
 }
