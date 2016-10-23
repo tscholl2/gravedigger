@@ -68,7 +68,9 @@ Example: 'gravedigger test/'
 		if !info.IsDir() {
 			return nil
 		}
-		pkgs, err := parser.ParseDir(fileSet, filePath, nil, 0)
+		pkgs, err := parser.ParseDir(fileSet, filePath, func(info os.FileInfo) bool {
+			return !strings.HasSuffix(info.Name(), "_test.go")
+		}, 0)
 		if err != nil {
 			return err
 		}
@@ -138,8 +140,8 @@ Example: 'gravedigger test/'
 		}
 	}
 
-	for pos, name := range declarations {
-		fmt.Printf("* %s = %s\n", name.name, pos)
+	for _, dec := range declarations {
+		fmt.Printf("* %s = %s\n", dec.name, dec.pos)
 	}
 
 	// Step 2: go through and unmark all used functions
@@ -182,8 +184,8 @@ Example: 'gravedigger test/'
 					return true
 				}
 				fmt.Println(node.Name)
-				fmt.Println("used in: ", currentFile, currentPos.Line, currentPos.Column)
-				fmt.Println("defd in: ", defFile, defLine, defColumn)
+				fmt.Println("used in: ", shortenPath(currentFile), currentPos.Line, currentPos.Column)
+				fmt.Println("defd in: ", shortenPath(defFile), defLine, defColumn)
 				delete(declarations, fmt.Sprintf("%s:%d:%d", defFile, defLine, defColumn))
 				return true
 			})
@@ -194,7 +196,19 @@ Example: 'gravedigger test/'
 
 	fmt.Printf("\n---------step 3-------------(list all unused declarations)\n\n")
 
-	for pos, name := range declarations {
-		fmt.Printf("* %s = %s\n", name.name, pos)
+	for _, dec := range declarations {
+		fmt.Printf("* %s = %s\n", dec.name, dec.pos)
 	}
+}
+
+func shortenPath(path string) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
+	s, err := filepath.Rel(cwd, path)
+	if err != nil {
+		panic(err)
+	}
+	return s
 }
