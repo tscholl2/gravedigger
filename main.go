@@ -24,9 +24,17 @@ var (
 	dir = "."
 )
 
-type pkg struct {
-	*ast.Package
-	declares map[string]*ast.Ident
+type declaration struct {
+	pos  token.Position
+	name string
+}
+
+func (d declaration) String() string {
+	fn, err := filepath.Abs(d.pos.Filename)
+	if err != nil {
+		panic(err)
+	}
+	return fmt.Sprintf("%s:%d:%d", fn, d.pos.Line, d.pos.Column)
 }
 
 func main() {
@@ -52,7 +60,8 @@ Example: 'gravedigger test/'
 
 	fmt.Printf("\n---------step 0-------------(find all code in directories)\n\n")
 
-	packages := make(map[string]*pkg)
+	declarations := make(map[string]declaration)
+	packages := []*ast.Package{}
 
 	fileSet := token.NewFileSet()
 	if err := filepath.Walk(dir, func(filePath string, info os.FileInfo, err error) error {
@@ -64,49 +73,49 @@ Example: 'gravedigger test/'
 			return err
 		}
 		for _, p := range pkgs {
-			// get the absoltue path to the directory
-			filePathAbs, err := filepath.Abs(filePath)
-			if err != nil {
-				panic(err)
-			}
-			packages[filePathAbs] = &pkg{p, make(map[string]*ast.Ident)}
+			packages = append(packages, p)
 		}
 		return nil
 	}); err != nil {
 		panic(err)
 	}
 
-	for p := range packages {
-		fmt.Println(p)
+	for _, p := range packages {
+		for _, f := range p.Files {
+			fmt.Println(fileSet.Position(f.Pos()).Filename)
+		}
 	}
 
 	// Step 1: go through and mark all declarations
 
 	fmt.Printf("\n---------step 1-------------(mark all declarations)\n\n")
 
-	for _, pkg := range packages {
-		for _, file := range pkg.Files {
-			for _, n := range file.Decls {
-				switch node := n.(type) {
-				case *ast.FuncDecl:
-					if node.Name.Name == "init" || node.Name.Name == "_" || (pkg.Name == "main" && node.Name.Name == "main") {
-						continue
-					}
-					pkg.declares[node.Name.Name] = node.Name
-				case *ast.GenDecl:
-					// var, const, types
-					for _, spec := range node.Specs {
-						switch s := spec.(type) {
-						case *ast.ValueSpec:
-							// constants and variables
-							for _, n := range s.Names {
-								pkg.declares[n.Name] = n
-							}
-						case *ast.TypeSpec:
-							// type definitions
-							pkg.declares[s.Name.Name] = s.Name
-							// add struct fields?
-							/*
+	for _, p := range packages {
+		for _, f := range p.Files {
+			for _, n := range f.Decls {
+				ast.Inspect(n, func(n ast.Node) bool {
+					switch node := n.(type) {
+					case *ast.FuncDecl:
+						if node.Name.Name == "init" || node.Name.Name == "_" || (p.Name == "main" && node.Name.Name == "main") {
+							return true
+						}
+						dec := declaration{fileSet.Position(node.Name.Pos()), node.Name.Name}
+						declarations[dec.String()] = dec
+					case *ast.GenDecl:
+						// var, const, types
+						for _, spec := range node.Specs {
+							switch s := spec.(type) {
+							case *ast.ValueSpec:
+								// constants and variables
+								for _, n := range s.Names {
+									dec := declaration{fileSet.Position(n.Pos()), n.Name}
+									declarations[dec.String()] = dec
+								}
+							case *ast.TypeSpec:
+								// type definitions
+								dec := declaration{fileSet.Position(s.Name.Pos()), s.Name.Name}
+								declarations[dec.String()] = dec
+								// add struct fields?
 								ast.Inspect(s.Type, func(n ast.Node) bool {
 									node, ok := n.(*ast.StructType)
 									if !ok {
@@ -114,24 +123,23 @@ Example: 'gravedigger test/'
 									}
 									for _, node2 := range node.Fields.List {
 										for _, node3 := range node2.Names {
-											pkg.declares[s.Name.Name+"."+node3.Name] = node3
+											dec := declaration{fileSet.Position(node3.Pos()), node3.Name}
+											declarations[dec.String()] = dec
 										}
 									}
 									return true
 								})
-							*/
+							}
 						}
 					}
-				}
+					return true
+				})
 			}
 		}
 	}
 
-	for k, v := range packages {
-		fmt.Printf("%s:\n", k)
-		for k2 := range v.declares {
-			fmt.Printf("\t- %s\n", k2)
-		}
+	for pos, name := range declarations {
+		fmt.Printf("* %s = %s\n", name.name, pos)
 	}
 
 	// Step 2: go through and unmark all used functions
@@ -166,10 +174,14 @@ Example: 'gravedigger test/'
 				if currentFile == defFile && currentPos.Line == defLine && currentPos.Column == defColumn {
 					return true
 				}
-				fmt.Println("need to dleete ", node.Name, " from ", defFile)
-				packageDir := filepath.Dir(defFile)
-				fmt.Println("declaration is in package: ", packageDir)
-				delete(packages[packageDir].declares, node.Name)
+				_, ok = declarations[fmt.Sprintf("%s:%d:%d", defFile, defLine, defColumn)]
+				if !ok {
+					return true
+				}
+				fmt.Println(node.Name)
+				fmt.Println("used in: ", currentFile, currentPos.Line, currentPos.Column)
+				fmt.Println("defd in: ", defFile, defLine, defColumn)
+				delete(declarations, fmt.Sprintf("%s:%d:%d", defFile, defLine, defColumn))
 				return true
 			})
 		}
@@ -179,22 +191,7 @@ Example: 'gravedigger test/'
 
 	fmt.Printf("\n---------step 3-------------(list all unused declarations)\n\n")
 
-	unused := make(map[string][]*ast.Ident)
-	for _, p := range packages {
-		if len(p.declares) == 0 {
-			continue
-		}
-		// fmt.Printf("%s:\n", k)
-		for _, node := range p.declares {
-			pos := fileSet.Position(node.NamePos)
-			filename, _ := filepath.Abs(pos.Filename)
-			unused[filename] = append(unused[filename], node)
-		}
-	}
-	for filename, arr := range unused {
-		for _, node := range arr {
-			pos := fileSet.Position(node.Pos())
-			fmt.Printf("%s:%d:%d ---> %s\n", filename, pos.Line, pos.Column, node.Name)
-		}
+	for pos, name := range declarations {
+		fmt.Printf("* %s = %s\n", name.name, pos)
 	}
 }
