@@ -9,32 +9,24 @@ import (
 	"flag"
 	"fmt"
 	"go/ast"
-	"go/build"
 	"go/parser"
 	"go/token"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 
-	"golang.org/x/tools/oracle/serial"
+	"golang.org/x/tools/cmd/guru/serial"
 )
 
 var (
 	dir = "."
 )
 
-type decl struct {
-	f *ast.File
-	n *ast.Ident
-}
-
 type pkg struct {
 	*ast.Package
-	dir      string
-	declares map[string]*decl
+	declares map[string]*ast.Ident
 }
 
 func main() {
@@ -44,8 +36,8 @@ from other packages in that it takes a directory and lists things that are unuse
 any where in that directory, including exported things in subpackages/subdirectories.
 Example: 'gravedigger'
 Example: 'gravedigger .'
-Example: 'gravedigger cmd/'
-Options:`)
+Example: 'gravedigger test/'
+`)
 		flag.CommandLine.PrintDefaults()
 	}
 	flag.Parse()
@@ -61,8 +53,8 @@ Options:`)
 	fmt.Printf("\n---------step 0-------------(find all code in directory)\n\n")
 
 	packages := make(map[string]*pkg)
-	fileSet := token.NewFileSet()
 
+	fileSet := token.NewFileSet()
 	if err := filepath.Walk(dir, func(filePath string, info os.FileInfo, err error) error {
 		if !info.IsDir() {
 			return nil
@@ -72,16 +64,12 @@ Options:`)
 			return err
 		}
 		for _, p := range pkgs {
-			// get the directory of the current directory relative to the GOPATH
+			// get the absoltue path to the directory
 			filePathAbs, err := filepath.Abs(filePath)
 			if err != nil {
 				panic(err)
 			}
-			filePathRelGoPath, err := filepath.Rel(path.Join(build.Default.GOPATH, "src"), filePathAbs)
-			if err != nil {
-				panic(err)
-			}
-			packages[filePathRelGoPath] = &pkg{p, filePathRelGoPath, make(map[string]*decl)}
+			packages[filePathAbs] = &pkg{p, make(map[string]*ast.Ident)}
 		}
 		return nil
 	}); err != nil {
@@ -104,19 +92,19 @@ Options:`)
 					if node.Name.Name == "init" || node.Name.Name == "_" || (pkg.Name == "main" && node.Name.Name == "main") {
 						continue
 					}
-					pkg.declares[node.Name.Name] = &decl{file, node.Name}
+					pkg.declares[node.Name.Name] = node.Name
 				case *ast.GenDecl:
 					// var, const, types
 					for _, spec := range node.Specs {
 						switch s := spec.(type) {
 						case *ast.ValueSpec:
-							// constants and variables.
+							// constants and variables
 							for _, n := range s.Names {
-								pkg.declares[n.Name] = &decl{file, n}
+								pkg.declares[n.Name] = n
 							}
 						case *ast.TypeSpec:
-							// type definitions.
-							pkg.declares[s.Name.Name] = &decl{file, s.Name}
+							// type definitions
+							pkg.declares[s.Name.Name] = s.Name
 						}
 					}
 				}
@@ -153,14 +141,22 @@ Options:`)
 
 	fmt.Printf("\n---------step 3-------------(list all unused declarations)\n\n")
 
-	for k, v := range packages {
-		if len(v.declares) == 0 {
+	unused := make(map[string][]*ast.Ident)
+	for _, p := range packages {
+		if len(p.declares) == 0 {
 			continue
 		}
-		fmt.Printf("%s:\n", k)
-		for k2, v2 := range v.declares {
-			// TODO get line number
-			fmt.Printf("\t- %s ---> %s.go:%s\n", k2, v2.f.Name.Name, fileSet.Position(v2.n.Pos()))
+		// fmt.Printf("%s:\n", k)
+		for _, node := range p.declares {
+			pos := fileSet.Position(node.NamePos)
+			filename, _ := filepath.Abs(pos.Filename)
+			unused[filename] = append(unused[filename], node)
+		}
+	}
+	for filename, arr := range unused {
+		for _, node := range arr {
+			pos := fileSet.Position(node.Pos())
+			fmt.Printf("%s:%d:%d ---> %s\n", filename, pos.Line, pos.Column, node.Name)
 		}
 	}
 
@@ -216,13 +212,16 @@ func (w *walker) Visit(n ast.Node) ast.Visitor {
 		defColumn, _ := strconv.Atoi(arr[2])
 		defFile := arr[0] //path.Join(build.Default.GOPATH, "src", w.p.dir, w.f.Name.Name+".go")
 		// fmt.Println("found node: ", node.Name)
-		fmt.Println("node at: ", currentFile, currentPos.Line, currentPos.Column)
-		fmt.Println("defn at: ", defFile, defLine, defColumn)
+		// fmt.Println("node at: ", currentFile, currentPos.Line, currentPos.Column)
+		// fmt.Println("defn at: ", defFile, defLine, defColumn)
 
-		// if filename == currentFile && pos.Line == lineNumber && pos.Column == columnNumber {
-		//	return w
-		// }
-
+		if currentFile == defFile && currentPos.Line == defLine && currentPos.Column == defColumn {
+			return w
+		}
+		// fmt.Println("need to dleete ", node.Name, " from ", defFile)
+		packageDir := filepath.Dir(defFile)
+		// fmt.Println("declaration is in package: ", packageDir)
+		delete(w.ps[packageDir].declares, node.Name)
 	}
 	return w
 }
