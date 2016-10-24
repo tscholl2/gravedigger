@@ -222,8 +222,17 @@ func shortenPath(path string) string {
 
 func markFast(fileSet *token.FileSet, packages []*ast.Package, declarations map[string]declaration) {
 	names := make(map[string]string)
+	toRemove := []string{}
 	for f, dec := range declarations {
-		names[dec.name] = f
+		_, ok := names[dec.name]
+		if ok {
+			toRemove = append(toRemove, f)
+		} else {
+			names[dec.name] = f
+		}
+	}
+	for _, f := range toRemove {
+		delete(declarations, f)
 	}
 	for _, p := range packages {
 		for _, f := range p.Files {
