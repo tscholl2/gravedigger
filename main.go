@@ -16,7 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"golang.org/x/tools/oracle/serial"
+	"golang.org/x/tools/cmd/guru/serial"
 )
 
 var (
