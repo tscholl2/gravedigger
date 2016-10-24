@@ -65,8 +65,53 @@ Options:
 
 	declarations := make(map[string]declaration)
 	packages := []*ast.Package{}
-
 	fileSet := token.NewFileSet()
+
+	parse(fileSet, packages, declarations)
+
+	// Step 1: go through and mark all declarations
+
+	fmt.Printf("\n---------step 1-------------(mark all declarations)\n\n")
+
+	mark(fileSet, packages, declarations)
+
+	for _, dec := range declarations {
+		fmt.Printf("* %s = %s\n", dec.name, dec.pos)
+	}
+
+	// Step 2: go through and unmark all used functions
+
+	fmt.Printf("\n---------step 2-------------(mark all used declarations)\n\n")
+
+	if fast {
+		unmarkFast(fileSet, packages, declarations)
+	} else {
+		unmarkGuru(fileSet, packages, declarations)
+	}
+
+	// Step 3: return a list of unused functions
+
+	fmt.Printf("\n---------step 3-------------(list all unused declarations)\n\n")
+
+	for _, dec := range declarations {
+		fmt.Printf("* %s = %s\n", dec.name, dec.pos)
+	}
+
+}
+
+func shortenPath(path string) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
+	s, err := filepath.Rel(cwd, path)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+func parse(fileSet *token.FileSet, packages []*ast.Package, declarations map[string]declaration) {
 	if err := filepath.Walk(dir, func(filePath string, info os.FileInfo, err error) error {
 		if !info.IsDir() {
 			return nil
@@ -90,11 +135,9 @@ Options:
 			fmt.Println(fileSet.Position(f.Pos()).Filename)
 		}
 	}
+}
 
-	// Step 1: go through and mark all declarations
-
-	fmt.Printf("\n---------step 1-------------(mark all declarations)\n\n")
-
+func mark(fileSet *token.FileSet, packages []*ast.Package, declarations map[string]declaration) {
 	for _, p := range packages {
 		for _, f := range p.Files {
 			for _, n := range f.Decls {
@@ -142,85 +185,9 @@ Options:
 			}
 		}
 	}
-
-	for _, dec := range declarations {
-		fmt.Printf("* %s = %s\n", dec.name, dec.pos)
-	}
-
-	// Step 2: go through and unmark all used functions
-
-	fmt.Printf("\n---------step 2-------------(mark all used declarations)\n\n")
-
-	if fast {
-		markFast(fileSet, packages, declarations)
-	} else {
-		for _, p := range packages {
-			for _, f := range p.Files {
-				ast.Inspect(f, func(n ast.Node) bool {
-					node, ok := n.(*ast.Ident)
-					if !ok {
-						return true
-					}
-					currentPos := fileSet.Position(node.Pos())
-					currentFile, _ := filepath.Abs(currentPos.Filename)
-					// fmt.Println("guru -json definition " + fmt.Sprintf("%s:#%d", fn, pos.Offset))
-					out, err := exec.Command("guru", "-json", "definition", fmt.Sprintf("%s:#%d", currentFile, currentPos.Offset)).Output()
-					if err != nil && err.Error() != "exit status 1" {
-						panic(err)
-					}
-					var def serial.Definition
-					json.Unmarshal(out, &def)
-					if def.ObjPos == "" {
-						return true
-					}
-					// fmt.Println("found definition of ", node.Name)
-					// fmt.Println(def)
-					arr := strings.Split(def.ObjPos, ":")
-					defLine, _ := strconv.Atoi(arr[1])
-					defColumn, _ := strconv.Atoi(arr[2])
-					defFile := arr[0] //path.Join(build.Default.GOPATH, "src", w.p.dir, w.f.Name.Name+".go")
-					// fmt.Println("found node: ", node.Name)
-					// fmt.Println("node at: ", currentFile, currentPos.Line, currentPos.Column)
-					// fmt.Println("defn at: ", defFile, defLine, defColumn)
-					if currentFile == defFile && currentPos.Line == defLine && currentPos.Column == defColumn {
-						return true
-					}
-					_, ok = declarations[fmt.Sprintf("%s:%d:%d", defFile, defLine, defColumn)]
-					if !ok {
-						return true
-					}
-					fmt.Println(node.Name)
-					fmt.Println("used in: ", shortenPath(currentFile), currentPos.Line, currentPos.Column)
-					fmt.Println("defd in: ", shortenPath(defFile), defLine, defColumn)
-					delete(declarations, fmt.Sprintf("%s:%d:%d", defFile, defLine, defColumn))
-					return true
-				})
-			}
-		}
-	}
-
-	// Step 3: return a list of unused functions
-
-	fmt.Printf("\n---------step 3-------------(list all unused declarations)\n\n")
-
-	for _, dec := range declarations {
-		fmt.Printf("* %s = %s\n", dec.name, dec.pos)
-	}
 }
 
-func shortenPath(path string) string {
-	cwd, err := os.Getwd()
-	if err != nil {
-		panic(err)
-	}
-	s, err := filepath.Rel(cwd, path)
-	if err != nil {
-		panic(err)
-	}
-	return s
-}
-
-func markFast(fileSet *token.FileSet, packages []*ast.Package, declarations map[string]declaration) {
+func unmarkFast(fileSet *token.FileSet, packages []*ast.Package, declarations map[string]declaration) {
 	names := make(map[string]string)
 	toRemove := []string{}
 	for f, dec := range declarations {
@@ -254,6 +221,52 @@ func markFast(fileSet *token.FileSet, packages []*ast.Package, declarations map[
 					return true
 				}
 				delete(declarations, f)
+				return true
+			})
+		}
+	}
+}
+
+func unmarkGuru(fileSet *token.FileSet, packages []*ast.Package, declarations map[string]declaration) {
+	for _, p := range packages {
+		for _, f := range p.Files {
+			ast.Inspect(f, func(n ast.Node) bool {
+				node, ok := n.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				currentPos := fileSet.Position(node.Pos())
+				currentFile, _ := filepath.Abs(currentPos.Filename)
+				// fmt.Println("guru -json definition " + fmt.Sprintf("%s:#%d", fn, pos.Offset))
+				out, err := exec.Command("guru", "-json", "definition", fmt.Sprintf("%s:#%d", currentFile, currentPos.Offset)).Output()
+				if err != nil && err.Error() != "exit status 1" {
+					panic(err)
+				}
+				var def serial.Definition
+				json.Unmarshal(out, &def)
+				if def.ObjPos == "" {
+					return true
+				}
+				// fmt.Println("found definition of ", node.Name)
+				// fmt.Println(def)
+				arr := strings.Split(def.ObjPos, ":")
+				defLine, _ := strconv.Atoi(arr[1])
+				defColumn, _ := strconv.Atoi(arr[2])
+				defFile := arr[0] //path.Join(build.Default.GOPATH, "src", w.p.dir, w.f.Name.Name+".go")
+				// fmt.Println("found node: ", node.Name)
+				// fmt.Println("node at: ", currentFile, currentPos.Line, currentPos.Column)
+				// fmt.Println("defn at: ", defFile, defLine, defColumn)
+				if currentFile == defFile && currentPos.Line == defLine && currentPos.Column == defColumn {
+					return true
+				}
+				_, ok = declarations[fmt.Sprintf("%s:%d:%d", defFile, defLine, defColumn)]
+				if !ok {
+					return true
+				}
+				fmt.Println(node.Name)
+				fmt.Println("used in: ", shortenPath(currentFile), currentPos.Line, currentPos.Column)
+				fmt.Println("defd in: ", shortenPath(defFile), defLine, defColumn)
+				delete(declarations, fmt.Sprintf("%s:%d:%d", defFile, defLine, defColumn))
 				return true
 			})
 		}
