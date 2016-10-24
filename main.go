@@ -70,7 +70,7 @@ Example: 'gravedigger test/'
 	packages := []*ast.Package{}
 	fileSet := token.NewFileSet()
 
-	parse(fileSet, packages, declarations)
+	parse(fileSet, &packages, declarations)
 
 	for _, p := range packages {
 		for _, f := range p.Files {
@@ -104,7 +104,7 @@ Example: 'gravedigger test/'
 
 }
 
-func parse(fileSet *token.FileSet, packages []*ast.Package, declarations map[string]declaration) {
+func parse(fileSet *token.FileSet, packages *[]*ast.Package, declarations map[string]declaration) {
 	if err := filepath.Walk(dir, func(filePath string, info os.FileInfo, err error) error {
 		if !info.IsDir() {
 			return nil
@@ -116,7 +116,7 @@ func parse(fileSet *token.FileSet, packages []*ast.Package, declarations map[str
 			return err
 		}
 		for _, p := range pkgs {
-			packages = append(packages, p)
+			*packages = append(*packages, p)
 		}
 		return nil
 	}); err != nil {
