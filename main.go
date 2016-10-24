@@ -24,26 +24,6 @@ type declaration struct {
 	node *ast.Ident
 }
 
-func (d declaration) String() string {
-	fn, err := filepath.Abs(d.pos.Filename)
-	if err != nil {
-		panic(err)
-	}
-	return fmt.Sprintf("%s:%d:%d", fn, d.pos.Line, d.pos.Column)
-}
-
-func shortenPath(path string) string {
-	cwd, err := os.Getwd()
-	if err != nil {
-		panic(err)
-	}
-	s, err := filepath.Rel(cwd, path)
-	if err != nil {
-		panic(err)
-	}
-	return s
-}
-
 func main() {
 	flag.CommandLine.Usage = func() {
 		fmt.Println(`gravedigger: looks for unused code in a directory. This differs
