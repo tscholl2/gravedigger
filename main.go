@@ -10,8 +10,10 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -19,75 +21,35 @@ var (
 	dir = "."
 )
 
-type declaration struct {
-	pos  token.Position
-	node *ast.Ident
-}
-
 func main() {
 	flag.CommandLine.Usage = func() {
-		fmt.Println(`gravedigger: looks for unused code in a directory. This differs
+		fmt.Println(`gravedigger [directory]: looks for unused code in a directory. This differs
 from other packages in that it takes a directory and lists things that are unused
 any where in that directory, including exported things in subpackages/subdirectories.
 Example: 'gravedigger'
 Example: 'gravedigger .'
-Example: 'gravedigger test/'
-Options: 
-`)
-		flag.PrintDefaults()
+Example: 'gravedigger test/'`)
 	}
 	flag.Parse()
 	if flag.NArg() > 0 {
 		dir = flag.Args()[0]
 	}
 	if f, err := os.Stat(dir); err != nil || !f.IsDir() {
-		panic(dir + " is not a directory")
+		log.Fatal(dir + ": not a directory")
 	}
-
-	// Step 0: parse all packages and subpackages in this directory
-
-	fmt.Printf("\n---------step 0-------------(find all code in directories)\n\n")
-
-	declarations := make(map[string]declaration)
-	packages := []*ast.Package{}
 	fileSet := token.NewFileSet()
-
-	parse(fileSet, &packages, declarations)
-
-	for _, p := range packages {
-		for _, f := range p.Files {
-			fmt.Println(fileSet.Position(f.Pos()).Filename)
-		}
-	}
-
+	// Step 0: parse all packages and subpackages in this directory
+	packages := parse(fileSet)
 	// Step 1: go through and mark all declarations
-
-	fmt.Printf("\n---------step 1-------------(mark all declarations)\n\n")
-
-	mark(fileSet, packages, declarations)
-
-	for _, dec := range declarations {
-		fmt.Printf("* %s = %s\n", dec.node.Name, dec.pos.String())
-	}
-
-	// Step 2: go through and unmark all used functions
-
-	fmt.Printf("\n---------step 2-------------(mark all used declarations)\n\n")
-
-	unmark(fileSet, packages, &declarations)
-
-	// Step 3: return a list of unused functions
-
-	fmt.Printf("\n---------step 3-------------(list all unused declarations)\n\n")
-
-	for _, dec := range declarations {
-		fmt.Printf("* %s = %s\n", dec.node.Name, dec.pos)
-	}
-
+	declarations := mark(packages)
+	// Step 2: go through and remove all used functions
+	declarations = unmark(packages, declarations)
+	// Step 3: print output
+	print(fileSet, declarations)
 }
 
-func parse(fileSet *token.FileSet, packages *[]*ast.Package, declarations map[string]declaration) {
-	if err := filepath.Walk(dir, func(filePath string, info os.FileInfo, err error) error {
+func parse(fileSet *token.FileSet) (packages []*ast.Package) {
+	filepath.Walk(dir, func(filePath string, info os.FileInfo, err error) error {
 		if !info.IsDir() {
 			return nil
 		}
@@ -95,18 +57,17 @@ func parse(fileSet *token.FileSet, packages *[]*ast.Package, declarations map[st
 			return !strings.HasSuffix(info.Name(), "_test.go")
 		}, 0)
 		if err != nil {
-			return err
+			panic(err)
 		}
 		for _, p := range pkgs {
-			*packages = append(*packages, p)
+			packages = append(packages, p)
 		}
 		return nil
-	}); err != nil {
-		panic(err)
-	}
+	})
+	return packages
 }
 
-func mark(fileSet *token.FileSet, packages []*ast.Package, declarations map[string]declaration) {
+func mark(packages []*ast.Package) (declarations []*ast.Ident) {
 	for _, p := range packages {
 		for _, f := range p.Files {
 			for _, n := range f.Decls {
@@ -116,22 +77,16 @@ func mark(fileSet *token.FileSet, packages []*ast.Package, declarations map[stri
 						if node.Name.Name == "init" || node.Name.Name == "MarshalJSON" || node.Name.Name == "Scan" || node.Name.Name == "Value" || (p.Name == "main" && node.Name.Name == "main") {
 							return true
 						}
-						dec := declaration{fileSet.Position(node.Name.Pos()), node.Name}
-						filename, _ := filepath.Abs(dec.pos.Filename)
-						declarations[fmt.Sprintf("%s:%d:%d", filename, dec.pos.Line, dec.pos.Column)] = dec
+						declarations = append(declarations, node.Name)
 					case *ast.GenDecl:
 						for _, spec := range node.Specs {
 							switch s := spec.(type) {
 							case *ast.ValueSpec:
 								for _, n := range s.Names {
-									dec := declaration{fileSet.Position(n.Pos()), n}
-									filename, _ := filepath.Abs(dec.pos.Filename)
-									declarations[fmt.Sprintf("%s:%d:%d", filename, dec.pos.Line, dec.pos.Column)] = dec
+									declarations = append(declarations, n)
 								}
 							case *ast.TypeSpec:
-								dec := declaration{fileSet.Position(s.Name.Pos()), s.Name}
-								filename, _ := filepath.Abs(dec.pos.Filename)
-								declarations[fmt.Sprintf("%s:%d:%d", filename, dec.pos.Line, dec.pos.Column)] = dec
+								declarations = append(declarations, s.Name)
 								ast.Inspect(s.Type, func(n ast.Node) bool {
 									node, ok := n.(*ast.StructType)
 									if !ok {
@@ -139,9 +94,7 @@ func mark(fileSet *token.FileSet, packages []*ast.Package, declarations map[stri
 									}
 									for _, node2 := range node.Fields.List {
 										for _, node3 := range node2.Names {
-											dec := declaration{fileSet.Position(node3.Pos()), node3}
-											filename, _ := filepath.Abs(dec.pos.Filename)
-											declarations[fmt.Sprintf("%s:%d:%d", filename, dec.pos.Line, dec.pos.Column)] = dec
+											declarations = append(declarations, node3)
 										}
 									}
 									return true
@@ -154,12 +107,13 @@ func mark(fileSet *token.FileSet, packages []*ast.Package, declarations map[stri
 			}
 		}
 	}
+	return declarations
 }
 
-func unmark(fileSet *token.FileSet, packages []*ast.Package, declarations *map[string]declaration) {
-	simpleDeclarations := make(map[string]declaration)
-	for _, dec := range *declarations {
-		simpleDeclarations[dec.node.Name] = dec
+func unmark(packages []*ast.Package, declarations []*ast.Ident) (unused []*ast.Ident) {
+	unusedDeclarations := make(map[string]*ast.Ident)
+	for _, n := range declarations {
+		unusedDeclarations[n.Name] = n
 	}
 	for _, p := range packages {
 		for _, f := range p.Files {
@@ -168,24 +122,38 @@ func unmark(fileSet *token.FileSet, packages []*ast.Package, declarations *map[s
 				if !ok {
 					return true
 				}
-				dec, ok := simpleDeclarations[node.Name]
+				oldNode, ok := unusedDeclarations[node.Name]
 				if !ok {
 					return true
 				}
-				curpos := fileSet.Position(node.Pos())
-				if dec.pos.Filename == curpos.Filename && dec.pos.Line == curpos.Line && dec.pos.Column == curpos.Column {
-					return true
+				if oldNode.Pos() != node.Pos() {
+					delete(unusedDeclarations, node.Name)
 				}
-				fmt.Println(node.Name)
-				fmt.Println("used in: ", curpos.String())
-				fmt.Println("defd in: ", dec.pos.String())
-				delete(simpleDeclarations, node.Name)
 				return true
 			})
 		}
 	}
-	*declarations = make(map[string]declaration)
-	for _, dec := range simpleDeclarations {
-		(*declarations)[dec.pos.String()] = dec
+	for _, d := range unusedDeclarations {
+		unused = append(unused, d)
+	}
+	return
+}
+
+func print(fileSet *token.FileSet, declarations []*ast.Ident) {
+	declarationsByFile := make(map[string][]*ast.Ident)
+	for _, n := range declarations {
+		if _, ok := declarationsByFile[fileSet.Position(n.Pos()).Filename]; !ok {
+			declarationsByFile[fileSet.Position(n.Pos()).Filename] = nil
+		}
+		declarationsByFile[fileSet.Position(n.Pos()).Filename] = append(declarationsByFile[fileSet.Position(n.Pos()).Filename], n)
+	}
+	for f := range declarationsByFile {
+		fmt.Printf("%s\n", f)
+		sort.Slice(declarationsByFile[f], func(i, j int) bool {
+			return fileSet.Position(declarationsByFile[f][i].Pos()).Line < fileSet.Position(declarationsByFile[f][j].Pos()).Line
+		})
+		for _, n := range declarationsByFile[f] {
+			fmt.Printf("\t- %s:%d:%d\n", n.Name, fileSet.Position(n.Pos()).Line, fileSet.Position(n.Pos()).Column)
+		}
 	}
 }
